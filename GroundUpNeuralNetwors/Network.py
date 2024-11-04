@@ -2,6 +2,8 @@
 This file contains functions and class implemetiaons for a
 node, layer, and network classes
 """
+from operator import truediv
+
 import cv2
 import numpy as np
 import os
@@ -14,7 +16,7 @@ def derivitive(activation, x):
         if x > 0:
             return 1
         else:
-            return 2
+            return 0
     elif activation == 'softmax':
         pass
     elif activation == 'sigmoid':
@@ -31,7 +33,9 @@ def activation(activation , x):
     if activation == 'relu':
         return np.maximum(0 , x)
     elif activation == 'softmax':
-        return np.exp(x)/np.sum(np.exp(x))
+        shift_x = x - np.max(x)
+        exp_x = np.exp(shift_x)
+        return exp_x / np.sum(exp_x)
     elif activation == 'sigmoid':
         return 1/(1+np.exp(-x))
 
@@ -87,7 +91,8 @@ class DenseLayer:
 
 class Model:
     def __init__(self, learn_rate, epochs, batch_size, train_set, test_set):
-        first_layer = DenseLayer(size=len(train_set[0]))
+        first_layer = DenseLayer(size=len(train_set[0][0]))
+
         self.layers = [first_layer]
         self.train_set = train_set
         self.test_set= test_set
@@ -109,6 +114,7 @@ class Model:
         for epoch in range(self.epochs):
             self.shuffle()
             for i in range(total_full_batches):
+                print(total_full_batches-i)
                 batch_set = self.train_set[ i * self.batch_size : (i+1) * self.batch_size]
                 self.calculate_gradient(batch_set)
                 self.apply_gradient()
@@ -121,16 +127,33 @@ class Model:
 
     def shuffle(self):
         random.shuffle(self.train_set)
+    def test(self,label):
+        greatest_activation = self.layers[-1].nodes[0].value
+        greatest_activation_index = 0
+        for index , node in enumerate(self.layers[-1].nodes[1:]):
+            if node.value > greatest_activation:
+                greatest_activation = node.value
+                greatest_activation_index = index
+
+        if  greatest_activation_index == label:
+            return True
+        return False
 
     def calculate_gradient(self, batch):
+        total_samples = 0
+        correctly_identified = 0
         for sample in batch:
             data = sample[0]
-            label = sample[1]
+            label = int(sample[1])
             self.forward_pass(data)
 
+            total_samples += 1
+            if self.test(label):
+                correctly_identified+=1
+
             #loss using cross entropy
-            loss = -np.log(self.layers[-1].nodes[label].value)
-            print(loss)
+            #loss = -np.log(self.layers[-1].nodes[label].value)
+
             # loss is the dot product of the output neuron and the predicted value
 
             # calculate logit loss for each node in the output node
@@ -138,16 +161,21 @@ class Model:
                 node.gradient['Bias'].append( node.value - (1 if i == label else 0) )
 
             #lets propogate these logit gradients backwards baby
-            for i in range(len(self.layers)-1,0,-1):
+            for i in range(len(self.layers)-2,0,-1):
                 for node_idx, node in enumerate(self.layers[i].nodes):
                     sum = 0
-                    for next_layer_node_idx, next_layer_node in enumerate(self.layers[i+1].nodes):
-                        sum += next_layer_node.weights[node_idx] * next_layer_node.gradient['Bias'][-1]
+                    for  next_layer_node in self.layers[i+1].nodes:
+                        # Calculate the product
+                        product = next_layer_node.weights[node_idx] * next_layer_node.gradient['Bias'][-1]
+
+
+                        sum += product
+
+
                     logit_partial = sum * derivitive(self.layers[i].activation, node.logit)
 
                     node.gradient['Bias'].append(logit_partial)
-                    # now that we have the bias, we can easily calcuate
-                    # the weight by multiplying it from the activation of the previous layer
+
 
             for layer_idx, layer in enumerate(self.layers):
                 for node in layer.nodes:
@@ -155,9 +183,11 @@ class Model:
                     for weight in range(len(node.weights)):
                         weight_gradient.append(node.gradient['Bias'][-1] * self.layers[layer_idx-1].nodes[weight].value)
                     node.gradient['Weights'].append(weight_gradient)
+        accuracy = correctly_identified/total_samples
+        print(f'The Accuracy of this batch was {accuracy}')
 
     def apply_gradient(self):
-        for layer in self.layers:
+        for layer in self.layers[1:]:
             for node in layer.nodes:
                 node.apply_gradient(self.learn_rate)
 
@@ -171,8 +201,7 @@ class Model:
             self.layers[i].forward_pass(self.layers[i-1])
 
 def load_data(path):
-    images = []
-    labels = []
+    output=[]
 
     sub_dir_list = os.listdir(path)
     for name in sub_dir_list:
@@ -185,35 +214,36 @@ def load_data(path):
             img_dir = os.path.join(sub_dir, img_name)
             # Read the image in grayscale mode
             image = cv2.imread(img_dir, cv2.IMREAD_GRAYSCALE)
-            image = image.flatten()
             if image is not None:
-                images.append(image)
-                labels.append(name)
+                image = image.flatten().astype(np.float32) / 255.0
+                output.append((image,name))
             else:
                 print(f"Warning: Failed to load image {img_dir}")
-
-    return images, labels
+    return output
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 2:
-        training_dir = os.path.join(sys.argv[1], 'training')
-        testing_dir = os.path.join(sys.argv[1], 'testing')
+    #if len(sys.argv) == 2:
+    training_dir = os.path.join('mnist_png', 'training')
+    testing_dir = os.path.join('mnist_png', 'testing')
 
-        train_set  = load_data(training_dir)
-        test_set = load_data(testing_dir)
-        network = Model(
-            learn_rate = 0.001,
-            epochs = 10,
-            batch_size = 32,
-            train_set = train_set,
-            test_set = test_set
-                    )
+    train_set  = load_data(training_dir)
+    test_set = load_data(testing_dir)
+    print("Data loaded")
 
-        network.add_layer(32,'relu')
-        network.add_layer(32, 'relu')
-        network.add_layer(32, 'relu')
+    network = Model(
+        learn_rate = 0.1,
+        epochs = 5,
+        batch_size = 32,
+        train_set = train_set,
+        test_set = test_set
+                )
 
-        #output layer
-        network.add_layer(32, 'softmax')
-        network.train()
+    network.add_layer(32,'relu')
+    network.add_layer(32, 'relu')
+    network.add_layer(32, 'relu')
+
+    #output layer
+    network.add_layer(10, 'softmax')
+    network.train()
+
