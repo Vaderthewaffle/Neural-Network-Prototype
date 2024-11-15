@@ -1,0 +1,207 @@
+import cv2
+import numpy as np
+import os
+
+LEARNING_RATE = 0.05
+EPOCHS = 10
+BATCHSIZE = 32
+
+
+class DenseLayer:
+    def __init__(self, input_shape, size, activation='relu'):
+        self.activation = activation
+        self.input_shape = input_shape
+        self.input = np.empty(input_shape)
+        self.logit = np.empty((size,))
+        self.output = np.empty((size,))
+        fan_in = self.input.shape[0]  # number of input features per neuron
+        self.weights = np.random.randn(self.output.shape[0], fan_in) * np.sqrt(2 / fan_in)
+        self.bias = np.zeros(size)
+
+        self.bias_grad = np.empty((BATCHSIZE, size))
+        self.weights_grad = np.empty((BATCHSIZE, *self.weights.shape))
+
+    def forward_pass(self, input_vector):
+        # Save input for use in backpropagation
+        self.input = input_vector
+
+        for i, node in enumerate(self.weights):
+            # Forward pass: z_i = x @ w_i + b_i (dot product of input and weights)
+            # z_i = logit for node i in this layer
+            self.logit[i] = np.sum(node * self.input) + self.bias[i]
+
+        # Apply activation function
+        self.output = activation(self.activation, self.logit)
+        return self.output
+
+    def backprop(self, gradient, sample):
+        # Compute gradient of the loss with respect to logits:
+        # dL/dz_i = gradient * activation_derivative(logit_i)
+        self.bias_grad[sample] = gradient * derivitive(self.activation, self.logit)
+
+        # Compute gradient of the loss with respect to weights:
+        # dL/dw_i = dL/dz_i * input (broadcasted for each neuron)
+        self.weights_grad[sample] = [self.input * self.bias_grad[sample][i] for i in range(self.output.shape[0])]
+
+        # Compute gradient of the loss with respect to input for backprop to the previous layer
+        input_grad = np.zeros_like(self.input)
+        input_layer_weights = np.swapaxes(self.weights, 0, 1)  # shape (fan_in, output size)
+
+        # Input gradients for each input neuron
+        for i, node in enumerate(input_layer_weights):
+            # Sum contributions of all downstream errors for this input node
+            input_grad[i] = np.sum(node * self.bias_grad[sample])
+
+        return input_grad
+
+    def apply_gradient(self):
+        # Update weights and biases using averaged gradients
+        self.weights -= np.mean(self.weights_grad, axis=0) * LEARNING_RATE
+        self.bias -= np.mean(self.bias_grad, axis=0) * LEARNING_RATE
+
+
+class Model:
+    def __init__(self, train_set, test_set):
+        self.layers = []
+        self.train_set = train_set
+        self.test_set = test_set
+        self.output_vector_shape = (self.train_set[0][0]).shape
+
+    def forward_pass(self, base_input):
+        input_layer = base_input
+        for layer in self.layers:
+            input_layer = layer.forward_pass(input_layer)
+        return input_layer
+
+    def apply_gradient(self):
+        for layer in self.layers:
+            layer.apply_gradient()
+
+    def shuffle(self):
+        np.random.shuffle(self.train_set)
+
+    def test(self, label):
+        # Identify class with highest activation (predicted class)
+        greatest_activation = np.argmax(self.layers[-1].output)
+        return greatest_activation == label
+
+    def calculate_gradient(self, batch_set):
+        print("New batch")
+        total_samples = 0
+        correctly_identified = 0
+
+        for sample in range(len(batch_set)):
+            image = batch_set[sample][0]
+            label = int(batch_set[sample][1])
+            output = self.forward_pass(image)
+            total_samples += 1
+            if self.test(label):
+                correctly_identified += 1
+
+            # Calculate errors
+            desired_output = np.zeros(self.layers[-1].output.shape)
+            desired_output[label] = 1
+            logit_error = output - desired_output  # Gradient of cross-entropy loss w.r.t. logits for output layer
+
+            output_layer = self.layers[-1]
+
+            # Backpropagation through output layer:
+            # dL/dz = softmax(output) - one_hot(label)
+            output_layer.bias_grad[sample] = logit_error
+            output_layer.weights_grad[sample] = [output_layer.input * output_layer.bias_grad[sample][i]
+                                                 for i in range(output_layer.output.shape[0])]
+            input_grad = np.zeros_like(output_layer.input)
+            input_layer_weights = np.swapaxes(output_layer.weights, 0, 1)
+
+            for j, node in enumerate(input_layer_weights):
+                input_grad[j] = np.sum(node * output_layer.bias_grad[sample])
+
+            for layer in self.layers[::-1][1:]:
+                input_grad = layer.backprop(input_grad, sample)
+
+        accuracy = correctly_identified / total_samples
+        print(f'The Accuracy of this batch was {accuracy}')
+
+    def train(self):
+        total_full_batches = len(self.train_set) // BATCHSIZE
+        remaining_samples = len(self.train_set) % BATCHSIZE
+
+        for epoch in range(EPOCHS):
+            self.shuffle()
+            for i in range(total_full_batches):
+                print(total_full_batches - i)
+                batch_set = self.train_set[i * BATCHSIZE: (i + 1) * BATCHSIZE]
+                self.calculate_gradient(batch_set)
+                self.apply_gradient()
+
+            if remaining_samples != 0:
+                batch_set = self.train_set[total_full_batches * BATCHSIZE:]
+                self.calculate_gradient(batch_set)
+                self.apply_gradient()
+
+    def add_dense_layer(self, size, activation):
+        next_layer = DenseLayer(self.output_vector_shape, size, activation)
+        self.output_vector_shape = (size,)
+        self.layers.append(next_layer)
+
+
+def load_data(path):
+    output = []
+    sub_dir_list = os.listdir(path)
+    for name in sub_dir_list:
+        sub_dir = os.path.join(path, name)
+        if not os.path.isdir(sub_dir):
+            continue
+
+        img_dir_list = os.listdir(sub_dir)
+        for img_name in img_dir_list:
+            img_dir = os.path.join(sub_dir, img_name)
+            image = cv2.imread(img_dir, cv2.IMREAD_GRAYSCALE)
+            if image is not None:
+                image = image.flatten().astype(np.float32) / 255.0
+                output.append((image, name))
+            else:
+                print(f"Warning: Failed to load image {img_dir}")
+    return output
+
+
+def derivitive(activation, x):
+    if activation == 'relu':
+        return np.where(x > 0, 1, 0)
+    elif activation == 'softmax':
+        pass
+    elif activation == 'sigmoid':
+        pass
+
+
+def activation(activation, x):
+    if activation == 'relu':
+        return np.maximum(0, x)
+    elif activation == 'softmax':
+        shift_x = x - np.max(x)
+        exp_x = np.exp(shift_x)
+        return exp_x / np.sum(exp_x)
+    elif activation == 'sigmoid':
+        return 1 / (1 + np.exp(-x))
+
+
+if __name__ == '__main__':
+    training_dir = os.path.join('mnist_png', 'training')
+    testing_dir = os.path.join('mnist_png', 'testing')
+
+    train_set = load_data(training_dir)
+    test_set = load_data(testing_dir)
+    print("Data loaded")
+
+    best_model_ever = Model(train_set, test_set)
+
+    # Adding layers to the model
+    best_model_ever.add_dense_layer(128, 'relu')
+    best_model_ever.add_dense_layer(64, 'relu')
+    best_model_ever.add_dense_layer(32, 'relu')
+    best_model_ever.add_dense_layer(32, 'relu')
+    best_model_ever.add_dense_layer(10, 'relu')
+
+    # Start training
+    best_model_ever.train()
+
